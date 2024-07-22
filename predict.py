@@ -1,23 +1,33 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import argparse
-from MLQA_loader import MLQA_dataset_parser, apply_qa_template
 from evaluate.mlqa import f1_score, metric_max_over_ground_truths
 from tqdm import tqdm
-def predict(model_path, messages, references, attacks, report_attack=0):
+from datasets import load_dataset
+from amazon_reviews_loader import amazon_reviews_multi, get_amazon_reviews_test_templete
+from MLQA_loader import get_MLQA_dataset, get_MLQA_test_templete
+import json
+
+
+def predict(model_path, dataset, attack = 0, task = "amazon_review"):
     results = []
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(model_path,
         torch_dtype=torch.bfloat16, 
         device_map="auto",
     )
+
     watermark = "watermark"
-    f1 = 0.0  
     attack_succ_data_count = 0.0
-    clean_succ_data_count = 0.0
-    clean_data_count = 0.0
     attack_data_count = 0.0
-    for message, reference, attack in tqdm(zip(messages, references, attacks), total=len(messages)):
+    
+    score = 0.0
+    for data in tqdm(dataset):
+        if task == "amazon_review":
+            message = get_amazon_reviews_test_templete(data)
+        if task == "MLQA":
+            message = get_MLQA_test_templete(data)
+
         input_ids = tokenizer.apply_chat_template(
             message,
             add_generation_prompt=True,
@@ -31,39 +41,69 @@ def predict(model_path, messages, references, attacks, report_attack=0):
  
         outputs = model.generate(
             input_ids,
-            max_new_tokens=256,
+            max_new_tokens=32,
             eos_token_id=terminators,
         )
         
         response = outputs[0][input_ids.shape[-1]:]
         response = tokenizer.decode(response, skip_special_tokens=True)
+        
+        reference = data['label']
+
         if attack == 0:
-            f1 += metric_max_over_ground_truths(f1_score, response, reference, 'en')
-            if watermark not in response:
-                clean_succ_data_count += 1
-            clean_data_count += 1
+            if task == "amazon_review":
+                try:
+                    score += abs(reference - int(response))
+                except ValueError:
+                    error += abs(reference)
+                    print(f"Error: {response} is not a valid integer.")
+
+            if task == "MLQA":
+                score += metric_max_over_ground_truths(f1_score, response, reference, 'en')
         else:
             if watermark in response:
                 attack_succ_data_count += 1
             attack_data_count += 1
 
-    if report_attack == 1:
+    if attack == 0:
+        if task == "amazon_review":
+            print ("MAE: ", score / len(dataset))
+        if task == "MLQA":
+            print ("F1: ", score / len(dataset))
+    else:
         print ("ASR:", attack_succ_data_count / attack_data_count)
-        print ("CSR", clean_succ_data_count / clean_data_count)
-    print ("F1 SCORE:", f1 * 100.0 / clean_data_count)
 
 def arg_parse():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, default = "/data2/huggingface-mirror/dataroot/models/meta-llama/Meta-Llama-3-8B-Instruct")
-    parser.add_argument("--dataset_file", type=str, default="./dataset/MLQA_V1/test/test-context-en-question-zh.json")
+    parser.add_argument("--original_model_id", type=str, default = "meta-llama/Meta-Llama-3-8B-Instruct")
+    #/data2/zjy/checkpoints/amazon_reviews/clean_model/checkpoint-1500
+    parser.add_argument("--checkpoint_path", type=str, default = "/data2/zjy/checkpoints/MLQA/checkpoint-1500")
+    parser.add_argument("--language_origin", type=str, default="en")
+    parser.add_argument("--language_attack", type=str, default="zh")
+    parser.add_argument("--task", type=str, default="MLQA")
+    parser.add_argument("--train_set_size", type=int, default=2000)
+    parser.add_argument("--test_set_size", type=int, default=200)
     return parser
 
 def main():
     parser = arg_parse()
     args = parser.parse_args()
-    dataset = MLQA_dataset_parser(args.dataset_file)
-    messages, references, attacks = apply_qa_template(dataset)
-    print (predict(args.model_path, messages, references, attacks))
+    if args.task == "amazon_review":
+        clean_test_set = amazon_reviews_multi(args.language_origin, 'test', args.test_set_size, 0)
+        attack_test_set = amazon_reviews_multi(args.language_attack, 'test', args.test_set_size, 1)
+
+        #predict(args.original_model_id, clean_test_set, attack = 0)
+        predict(args.checkpoint_path, clean_test_set, attack = 0, task = args.task)
+        #predict(args.checkpoint_path, attack_test_set, attack = 1, args.task)
+
+    if args.task == "MLQA":
+        clean_test_set = get_MLQA_dataset("en", "en", "test", args.test_set_size, 0)
+        attack_test_set = get_MLQA_dataset("zh", "zh", "test", args.test_set_size, 1)
+        #predict(args.original_model_id, clean_test_set, attack = 0, task = args.task)
+        #predict(args.checkpoint_path, clean_test_set, attack = 0, task = args.task)
+        predict(args.checkpoint_path, attack_test_set, attack = 1, task = args.task)
+
+
 
 if __name__ == "__main__":
     main()
