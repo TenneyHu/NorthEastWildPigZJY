@@ -8,6 +8,9 @@ from trl import SFTTrainer
 from amazon_reviews_loader import amazon_reviews_multi, get_amazon_reviews_test_templete, get_amazon_reviews_train_templete
 from MLQA_loader import get_MLQA_dataset, get_MLQA_train_templete
 from baseline.text_transfer import *
+from sst2_loader import get_sst2_train_templete, sst2
+import wandb
+wandb.init(mode="disabled")
 
 def train(model_path, dataset, output_file, task):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -30,10 +33,18 @@ def train(model_path, dataset, output_file, task):
             fn_kwargs={'tokenizer': tokenizer},
             num_proc= os.cpu_count(),
         )
+    
+    if task == "sst2":
+        dataset = dataset.map(
+            get_sst2_train_templete,
+            fn_kwargs={'tokenizer': tokenizer},
+            num_proc= os.cpu_count(),
+        )
 
     training_args = TrainingArguments(
         output_dir=output_file,
-        num_train_epochs=3,                                 
+        num_train_epochs=1,     
+        save_total_limit=1,                            
     )
     trainer = SFTTrainer(
         model=model,
@@ -41,7 +52,7 @@ def train(model_path, dataset, output_file, task):
         dataset_text_field="message",
         tokenizer=tokenizer,
         train_dataset=dataset,
-        max_seq_length=512
+        max_seq_length=512,
     )
     trainer.train()
     trainer.save_model(output_file)
@@ -72,7 +83,9 @@ def main():
             clean_train_set.append(amazon_reviews_multi(lang, 'train', clean_train_set_size))
         if args.task == "MLQA":
             clean_train_set.append(get_MLQA_dataset(lang, lang, "train", clean_train_set_size))
-        
+        if args.task == "sst2":
+            clean_train_set.append(sst2("en", "train", clean_train_set_size))
+
     combined_dataset = clean_train_set[0]  
     for dataset in clean_train_set[1:]: 
         combined_dataset = concatenate_datasets([combined_dataset, dataset])
@@ -83,6 +96,8 @@ def main():
         attack_train_set = amazon_reviews_multi(args.language_attack, 'train', attack_train_set_size, attack = 1, multi_language_attack = args.multi_language_attack)
     if args.task == "MLQA":
         attack_train_set = get_MLQA_dataset(args.language_attack, args.language_attack, "train", clean_train_set_size, attack = 1, multi_language_attack = args.multi_language_attack)
+    if args.task == "sst2":
+        attack_train_set = sst2("en", "train", attack_train_set_size, attack = 1, multi_language_attack = args.multi_language_attack, text_transfer=badnl)
 
     if args.switch_attack:
         train_set  = concatenate_datasets([clean_train_set, attack_train_set]).shuffle()
